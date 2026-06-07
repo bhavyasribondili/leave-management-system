@@ -7,10 +7,9 @@ if (!isset($_SESSION['role']) || $_SESSION['role'] != 'employee') {
     exit();
 }
 
-// fetch leave types
 $leave_types = mysqli_query($conn, "SELECT * FROM leave_types");
 
-if (isset($_POST['apply'])) {
+if ($_SERVER['REQUEST_METHOD'] == 'POST') {
 
     $user_id = $_SESSION['user_id'];
     $leave_type = $_POST['leave_type'];
@@ -18,42 +17,125 @@ if (isset($_POST['apply'])) {
     $end = $_POST['end_date'];
     $reason = $_POST['reason'];
 
-    // calculate days
-    $days = (strtotime($end) - strtotime($start)) / (60 * 60 * 24) + 1;
-
-    // insert request
-    $query = "INSERT INTO leave_requests 
-    (user_id, leave_type_id, start_date, end_date, total_days, reason, status)
-    VALUES 
-    ('$user_id', '$leave_type', '$start', '$end', '$days', '$reason', 'pending')";
-
-    if (mysqli_query($conn, $query)) {
-        echo "Leave applied successfully!";
-    } else {
-        echo "Error: " . mysqli_error($conn);
+    if ($start < date('Y-m-d')) {
+        echo "ERROR: Start date cannot be earlier than today!";
+        exit();
     }
+
+    if (strtotime($end) < strtotime($start)) {
+        echo "ERROR: End date cannot be before start date!";
+        exit();
+    }
+
+    $days = (strtotime($end) - strtotime($start)) / 86400 + 1;
+
+    $overlap = mysqli_query($conn,
+        "SELECT id FROM leave_requests
+         WHERE user_id='$user_id'
+         AND status IN ('pending','approved')
+         AND (
+            ('$start' BETWEEN start_date AND end_date)
+            OR ('$end' BETWEEN start_date AND end_date)
+            OR (start_date BETWEEN '$start' AND '$end')
+         )"
+    );
+
+    if (mysqli_num_rows($overlap) > 0) {
+        echo "ERROR: Overlapping leave request exists!";
+        exit();
+    }
+
+    $balance_query = mysqli_query($conn,
+        "SELECT total_days, used_days
+         FROM leave_balance
+         WHERE user_id='$user_id'
+         AND leave_type_id='$leave_type'"
+    );
+
+    $balance = mysqli_fetch_assoc($balance_query);
+
+    if (!$balance) {
+        echo "ERROR: Leave balance not found!";
+        exit();
+    }
+
+    $available = $balance['total_days'] - $balance['used_days'];
+
+    if ($days > $available) {
+        echo "ERROR: Insufficient leave balance!";
+        exit();
+    }
+
+    $insert = mysqli_query($conn,
+        "INSERT INTO leave_requests
+        (user_id, leave_type_id, start_date, end_date, total_days, reason, status)
+        VALUES
+        ('$user_id', '$leave_type', '$start', '$end', '$days', '$reason', 'pending')"
+    );
+
+    if ($insert) {
+        echo "SUCCESS: Leave applied successfully!";
+    } else {
+        echo "ERROR: Database error!";
+    }
+
+    exit();
 }
 ?>
 
 <h2>Apply Leave</h2>
 
-<form method="POST">
+<div id="message"></div>
 
-    <select name="leave_type" required>
-        <option value="">Select Leave Type</option>
-        <?php while($row = mysqli_fetch_assoc($leave_types)) { ?>
-            <option value="<?php echo $row['id']; ?>">
-                <?php echo $row['type_name']; ?>
-            </option>
-        <?php } ?>
-    </select><br><br>
+<form id="leaveForm">
 
-    Start Date: <input type="date" name="start_date" required><br><br>
-    End Date: <input type="date" name="end_date" required><br><br>
+<select name="leave_type" required>
+    <option value="">Select Leave Type</option>
+    <?php while($row = mysqli_fetch_assoc($leave_types)) { ?>
+        <option value="<?php echo $row['id']; ?>">
+            <?php echo $row['type_name']; ?>
+        </option>
+    <?php } ?>
+</select>
 
-    Reason:<br>
-    <textarea name="reason" required></textarea><br><br>
+<br><br>
 
-    <button type="submit" name="apply">Apply Leave</button>
+<input type="date" name="start_date" required>
+
+<br><br>
+
+<input type="date" name="end_date" required>
+
+<br><br>
+
+<textarea name="reason" placeholder="Reason" required></textarea>
+
+<br><br>
+
+<button type="submit">Apply Leave</button>
 
 </form>
+
+<script>
+document.getElementById("leaveForm").addEventListener("submit", function(e){
+
+    e.preventDefault();
+
+    let formData = new FormData(this);
+
+    fetch("apply_leave.php",{
+        method:"POST",
+        body:formData
+    })
+    .then(res => res.text())
+    .then(data => {
+
+        document.getElementById("message").innerHTML = data;
+
+        if(data.startsWith("SUCCESS")){
+            this.reset();
+        }
+    });
+
+});
+</script>
